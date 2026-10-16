@@ -3,6 +3,21 @@ modules:
     # Module name, needs to be passed as parameter by Prometheus.
   - name: "fake"
     protocol: 'tcp/ip'
+    # Certain modbus devices need special timing workarounds
+    timeout: # int
+    baudrate: # int
+    databits: # int
+    stopbits: # int
+    parity: # string
+    workarounds:
+      # Sleep a certain time after the TCP connection is established
+      sleepAfterConnect: "1s"
+      # Waiting period interval before trying to fulfill a failed scrape request again
+      scrapeErrorWait: # int representing milliseconds.
+      # Retries for failed scrape
+      scrapeErrorRetryCount: # int
+      # Sleep a certain amount of time between metrics (if the server needs a break between queries)
+      scrapeInterludeWait: "0ms"
     metrics:
         # Name of the metric.
       - name: "power_consumption_total"

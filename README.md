@@ -11,8 +11,8 @@ them via HTTP for Prometheus consumption.
  Go to: https://bramp.github.io/js-sequence-diagrams/
 
  ```
-Note right of Prometheus: promehteus.yml \n --- \n target: Modbus-TCP-10.0.0.5 \n sub_target: Modbus-Unit-10 \n module: VendorXY
-Prometheus->Exporter: http://xxx.de/metrics?target=10.0.0.5&sub_target=10&module=vendorxy
+Note right of Prometheus: prometheus.yml \n --- \n target: Modbus-TCP-10.0.0.5 \n sub_target: Modbus-Unit-10 \n module: VendorXY
+Prometheus->Exporter: http://xxx.de/modbus?target=10.0.0.5&sub_target=10&module=vendorxy
 Note right of Exporter: modbus.yml \n --- \n module: VendorXY \n - temperature_a: 400001 \n - temperature_b: 400002
 
 Exporter->Modbus_TCP_10.0.0.5: tcp://10.0.0.5?unit=10&register=400001
@@ -35,6 +35,12 @@ Exporter-->Prometheus:temperature_a{module="VendorXY",sub_target="10"} 20 \ntemp
 
 ## Building
 
+Prerequisite packages:
+- make
+- go (called `golang` at some package managers)
+
+Run:
+
 ```bash
 make build
 ```
@@ -42,9 +48,10 @@ make build
 
 ## Getting Started
 
-The modbus exporter needs to be passed *target* (including port), *module* and *sub_module* as parameters
-by Prometheus, this can be done with relabelling (see
-[prometheus.yml](prometheus.yml)).
+The modbus exporter can be tested standalone, but should be added as a target in your Prometheus config.
+
+Prometheus needs the following labels parsed by the modbus exporter: *target* (including port), *module* and *sub_module* as parameters,
+this can be done with relabelling as shown in the example [prometheus.yml](prometheus.yml).
 
 Once Prometheus is properly configured, run the exporter via:
 
@@ -56,13 +63,30 @@ Supported flags:
 
 [embedmd]:# (help.txt)
 ```txt
-Usage of ./modbus_exporter:
-  -config.file string
-    	Sets the configuration file. (default "modbus.yml")
-  -modbus-listen-address string
-    	The address to listen on for HTTP requests exposing modbus metrics. (default ":9602")
-  -telemetry-listen-address string
-    	The address to listen on for HTTP requests exposing telemetry metrics about the exporter itself. (default ":9602")
+usage: modbus_exporter [<flags>]
+
+
+Flags:
+  -h, --[no-]help                Show context-sensitive help (also try
+                                 --help-long and --help-man).
+      --config.file=modbus.yml ...  
+                                 Sets the configuration file.
+      --[no-]web.systemd-socket  Use systemd socket activation listeners instead
+                                 of port listeners (Linux only).
+      --web.listen-address=:9602 ...  
+                                 Addresses on which to expose metrics and web
+                                 interface. Repeatable for multiple addresses.
+                                 Examples: `:9100` or `[::1]:9100` for http,
+                                 `vsock://:9100` for vsock
+      --web.config.file=""       Path to configuration file that can
+                                 enable TLS or authentication. See:
+                                 https://github.com/prometheus/exporter-toolkit/blob/master/docs/web-configuration.md
+      --log.level=info           Only log messages with the given severity or
+                                 above. One of: [debug, info, warn, error]
+      --log.format=logfmt        Output format of log messages. One of: [logfmt,
+                                 json]
+      --[no-]version             Show application version.
+
 ```
 Visit http://localhost:9602/modbus?target=1.2.3.4:502&module=fake&sub_target=1 where 1.2.3.4:502 is the IP and port number of the modbus IP device to get metrics from,
 while module and sub_target parameters specify which module and subtarget to use from the config file.
@@ -72,9 +96,54 @@ Visit http://localhost:9602/metrics to get the metrics of the exporter itself.
 
 ## Configuration File
 
-Check out [`modbus.yml`](/modbus.yml) for more details on the configuration file
+Check out [`modbus.yml`](modbus.yml) for more details on the configuration file
 format.
 
+The `--config.file` parameter can be used multiple times to load more than one file.
+It also supports [glob filename matching](https://pkg.go.dev/path/filepath#Glob), e.g. `modbus_*.yml`.
+
+## Systemd service
+
+You can create a systemd service if you want to run modbus exporter as a background service. Start by creating a modbus_exporter system account (example on Debian)
+
+```shell
+useradd -r modbus_exporter
+```
+
+Place the modbus_exporter binary at `/usr/local/bin/modbus_exporter`
+
+The following example systemd unit file can be saved to `/etc/systemd/system/modbus_exporter.service`:
+
+```systemd
+[Unit]
+Description=Modbus TCP Prometheus exporter
+Requires=network.target
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=modbus_exporter
+Group=nogroup
+ExecStart=/usr/local/bin/modbus_exporter --config.file='/etc/modbus_exporter.yml'
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then locate your Modbus exporter config file in `/etc/modbus_exporter.yml`, and run the following commands to make systemd aware of config changes and startup the modbus_exporter
+
+```shell
+systemctl daemon-reload
+systemctl start modbus_exporter
+```
+
+In order to start the service at system boot, run the following
+
+```shell
+systemctl enable modbus_exporter
+```
 
 ## TODO
 

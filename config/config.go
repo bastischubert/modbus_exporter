@@ -1,7 +1,21 @@
+// Copyright 2019 Richard Hartmann
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package config
 
 import (
 	"fmt"
+	"time"
 
 	multierror "github.com/hashicorp/go-multierror"
 )
@@ -46,14 +60,22 @@ type ListTargets map[string]*Module
 
 // Module defines the configuration parameters of a modbus module.
 type Module struct {
-	Name     string         `yaml:"name"`
-	Protocol ModbusProtocol `yaml:"protocol"`
-	Timeout  int            `yaml:"timeout"`
-	Baudrate int            `yaml:"baudrate"`
-	Databits int            `yaml:"databits"`
-	Stopbits int            `yaml:"stopbits"`
-	Parity   string         `yaml:"parity"`
-	Metrics  []MetricDef    `yaml:"metrics"`
+	Name        string         `yaml:"name"`
+	Protocol    ModbusProtocol `yaml:"protocol"`
+	Timeout     int            `yaml:"timeout"`
+	Baudrate    int            `yaml:"baudrate"`
+	Databits    int            `yaml:"databits"`
+	Stopbits    int            `yaml:"stopbits"`
+	Parity      string         `yaml:"parity"`
+	Metrics     []MetricDef    `yaml:"metrics"`
+	Workarounds Workarounds    `yaml:"workarounds"`
+}
+
+type Workarounds struct {
+	SleepAfterConnect     time.Duration `yaml:"sleepAfterConnect"`
+	ScrapeErrorRetryCount int           `yaml:"scrapeErrorRetryCount"` // Default value 3
+	ScrapeErrorWait       int           `yaml:"scrapeErrorWait"`       // In milliseconds, default value 100
+	ScrapeInterludeWait   time.Duration `yaml:"scrapeInterludeWait"`   // default value 0
 }
 
 // RegisterAddr specifies the register in the possible output of _digital

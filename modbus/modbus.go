@@ -1,22 +1,36 @@
+// Copyright 2019 Richard Hartmann
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package modbus
 
 import (
 	"encoding/binary"
 	"fmt"
+	"maps"
 	"math"
 	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/RichiH/modbus_exporter/config"
 	"github.com/goburrow/modbus"
-	"github.com/lupoDharkael/modbus_exporter/config"
 )
 
 // Exporter represents a Prometheus exporter converting modbus information
 // retrieved from remote targets via TCP as Prometheus style metrics.
 type Exporter struct {
-	config config.Config
+	Config config.Config
 }
 
 // NewExporter returns a new modbus exporter.
@@ -26,7 +40,7 @@ func NewExporter(config config.Config) *Exporter {
 
 // GetConfig loads the config file
 func (e *Exporter) GetConfig() *config.Config {
-	return &e.config
+	return &e.Config
 }
 
 // Scrape scrapes the given target via TCP based on the configuration of the
@@ -34,7 +48,7 @@ func (e *Exporter) GetConfig() *config.Config {
 func (e *Exporter) Scrape(targetAddress string, subTarget byte, moduleName string) (prometheus.Gatherer, error) {
 	reg := prometheus.NewRegistry()
 
-	module := e.config.GetModule(moduleName)
+	module := e.Config.GetModule(moduleName)
 	if module == nil {
 		return nil, fmt.Errorf("failed to find '%v' in config", moduleName)
 	}
@@ -50,13 +64,17 @@ func (e *Exporter) Scrape(targetAddress string, subTarget byte, moduleName strin
 			targetAddress, module.Name)
 	}
 
+	if module.Workarounds.SleepAfterConnect > 0 {
+		time.Sleep(module.Workarounds.SleepAfterConnect)
+	}
+
 	// TODO: Should we reuse this?
 	c := modbus.NewClient(handler)
 
 	// Close tcp connection.
 	defer handler.Close()
 
-	metrics, err := scrapeMetrics(module.Metrics, c)
+	metrics, err := scrapeMetrics(module.Metrics, c, module.Workarounds.ScrapeInterludeWait)
 	if err != nil {
 		return nil, fmt.Errorf("failed to scrape metrics for module '%v': %v", moduleName, err.Error())
 	}
@@ -75,6 +93,8 @@ func registerMetrics(reg prometheus.Registerer, moduleName string, metrics []met
 	for _, m := range metrics {
 		if m.Labels == nil {
 			m.Labels = map[string]string{}
+		} else {
+			m.Labels = maps.Clone(m.Labels)
 		}
 		m.Labels["module"] = moduleName
 
@@ -152,7 +172,7 @@ func keys(m map[string]string) []string {
 	return keys
 }
 
-func scrapeMetrics(definitions []config.MetricDef, c modbus.Client) ([]metric, error) {
+func scrapeMetrics(definitions []config.MetricDef, c modbus.Client, interludewait time.Duration) ([]metric, error) {
 	metrics := []metric{}
 
 	if len(definitions) == 0 {
@@ -204,6 +224,8 @@ func scrapeMetrics(definitions []config.MetricDef, c modbus.Client) ([]metric, e
 		}
 
 		metrics = append(metrics, m)
+		// Some controllers need an interlude timeout between queries
+		time.Sleep(interludewait)
 	}
 
 	return metrics, nil
@@ -256,7 +278,7 @@ type InsufficientRegistersError struct {
 
 // Error implements the Golang error interface.
 func (e *InsufficientRegistersError) Error() string {
-	return fmt.Sprintf("insufficient amount of registers provided: %v", e.e)
+	return fmt.Sprintf("insufficient amount of register data provided: %v", e.e)
 }
 
 // Parse parses the given byte slice based on the specified Modbus data type and
@@ -271,8 +293,21 @@ func parseModbusData(d config.MetricDef, rawData []byte) (float64, error) {
 				return float64(0), fmt.Errorf("expected bit position on boolean data type")
 			}
 
-			// Convert byte to uint16
-			data := uint16(rawData[0])
+			// Coils and discrete inputs return a single byte, holding and
+			// input registers return a 16 bit word.
+			var data uint16
+			switch len(rawData) {
+			case 1:
+				data = uint16(rawData[0])
+			case 2:
+				data = binary.BigEndian.Uint16(rawData)
+			default:
+				return float64(0), &InsufficientRegistersError{fmt.Sprintf("expected 1 or 2 bytes, got %v", len(rawData))}
+			}
+
+			if *d.BitOffset < 0 || *d.BitOffset >= len(rawData)*8 {
+				return float64(0), fmt.Errorf("bit offset %v out of range for %v byte(s)", *d.BitOffset, len(rawData))
+			}
 
 			if data&(uint16(1)<<uint16(*d.BitOffset)) > 0 {
 				return float64(1), nil
@@ -282,14 +317,14 @@ func parseModbusData(d config.MetricDef, rawData []byte) (float64, error) {
 	case config.ModbusFloat16:
 		{
 			if len(rawData) != 2 {
-				return float64(0), &InsufficientRegistersError{fmt.Sprintf("expected 1, got %v", len(rawData))}
+				return float64(0), &InsufficientRegistersError{fmt.Sprintf("expected 2 bytes, got %v", len(rawData))}
 			}
 			panic("implement")
 		}
 	case config.ModbusInt16:
 		{
 			if len(rawData) != 2 {
-				return float64(0), &InsufficientRegistersError{fmt.Sprintf("expected 1, got %v", len(rawData))}
+				return float64(0), &InsufficientRegistersError{fmt.Sprintf("expected 2 bytes, got %v", len(rawData))}
 			}
 			rawDataWithEndianness, err := convertEndianness16b(d.Endianness, rawData)
 			if err != nil {
@@ -301,7 +336,7 @@ func parseModbusData(d config.MetricDef, rawData []byte) (float64, error) {
 	case config.ModbusUInt16:
 		{
 			if len(rawData) != 2 {
-				return float64(0), &InsufficientRegistersError{fmt.Sprintf("expected 1, got %v", len(rawData))}
+				return float64(0), &InsufficientRegistersError{fmt.Sprintf("expected 2 bytes, got %v", len(rawData))}
 			}
 			rawDataWithEndianness, err := convertEndianness16b(d.Endianness, rawData)
 			if err != nil {
@@ -313,7 +348,7 @@ func parseModbusData(d config.MetricDef, rawData []byte) (float64, error) {
 	case config.ModbusInt32:
 		{
 			if len(rawData) != 4 {
-				return float64(0), &InsufficientRegistersError{fmt.Sprintf("expected 2, got %v", len(rawData))}
+				return float64(0), &InsufficientRegistersError{fmt.Sprintf("expected 4 bytes, got %v", len(rawData))}
 			}
 			rawDataWithEndianness, err := convertEndianness32b(d.Endianness, rawData)
 			if err != nil {
@@ -325,7 +360,7 @@ func parseModbusData(d config.MetricDef, rawData []byte) (float64, error) {
 	case config.ModbusUInt32:
 		{
 			if len(rawData) != 4 {
-				return float64(0), &InsufficientRegistersError{fmt.Sprintf("expected 2, got %v", len(rawData))}
+				return float64(0), &InsufficientRegistersError{fmt.Sprintf("expected 4 bytes, got %v", len(rawData))}
 			}
 			rawDataWithEndianness, err := convertEndianness32b(d.Endianness, rawData)
 			if err != nil {
@@ -337,7 +372,7 @@ func parseModbusData(d config.MetricDef, rawData []byte) (float64, error) {
 	case config.ModbusFloat32:
 		{
 			if len(rawData) != 4 {
-				return float64(0), &InsufficientRegistersError{fmt.Sprintf("expected 2, got %v", len(rawData))}
+				return float64(0), &InsufficientRegistersError{fmt.Sprintf("expected 4 bytes, got %v", len(rawData))}
 			}
 			rawDataWithEndianness, err := convertEndianness32b(d.Endianness, rawData)
 			if err != nil {
@@ -349,7 +384,7 @@ func parseModbusData(d config.MetricDef, rawData []byte) (float64, error) {
 	case config.ModbusInt64:
 		{
 			if len(rawData) != 8 {
-				return float64(0), &InsufficientRegistersError{fmt.Sprintf("expected 4, got %v", len(rawData))}
+				return float64(0), &InsufficientRegistersError{fmt.Sprintf("expected 8 bytes, got %v", len(rawData))}
 			}
 			rawDataWithEndianness, err := convertEndianness64b(d.Endianness, rawData)
 			if err != nil {
@@ -361,7 +396,7 @@ func parseModbusData(d config.MetricDef, rawData []byte) (float64, error) {
 	case config.ModbusUInt64:
 		{
 			if len(rawData) != 8 {
-				return float64(0), &InsufficientRegistersError{fmt.Sprintf("expected 4, got %v", len(rawData))}
+				return float64(0), &InsufficientRegistersError{fmt.Sprintf("expected 8 bytes, got %v", len(rawData))}
 			}
 			rawDataWithEndianness, err := convertEndianness64b(d.Endianness, rawData)
 			if err != nil {
@@ -373,7 +408,7 @@ func parseModbusData(d config.MetricDef, rawData []byte) (float64, error) {
 	case config.ModbusFloat64:
 		{
 			if len(rawData) != 8 {
-				return float64(0), &InsufficientRegistersError{fmt.Sprintf("expected 4, got %v", len(rawData))}
+				return float64(0), &InsufficientRegistersError{fmt.Sprintf("expected 8 bytes, got %v", len(rawData))}
 			}
 			rawDataWithEndianness, err := convertEndianness64b(d.Endianness, rawData)
 			if err != nil {
